@@ -6,6 +6,8 @@ import axios from 'axios';
 import { Boom } from '@hapi/boom';
 import { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import PineconePkg from '@pinecone-database/pinecone';
+import { GoogleAuth } from 'google-auth-library';
+import { v1 as uuidv1 } from 'uuid';
 
 const logger = Pino({ level: process.env.LOG_LEVEL || 'info' });
 const app = express();
@@ -14,14 +16,14 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 
 // --------------------- Suas Chaves de API ---------------------
-const OPENROUTER_KEY = "sk-or-v1-...";
-const PINECONE_API_KEY = "pcsk-...";
+const OPENROUTER_KEY = "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";
+const PINECONE_API_KEY = "pcsk_3xpF3r_KgUPQgiGwpEusPR2iSAU3cERDVMi2LtDNHCHwAGxafTUUDfCTDgnf51aiWzmaTh";
 const INDEX_NAME = "produtos-chatbot";
 
+// --------------------- Pinecone ---------------------
 let index;
 let pc;
 
-// --------------------- Funções Pinecone ---------------------
 async function initPinecone() {
   const PineconeClient = PineconePkg.PineconeClient || PineconePkg.default?.PineconeClient;
   pc = new PineconeClient();
@@ -38,19 +40,34 @@ async function initPinecone() {
   }
 }
 
-// --------------------- Funções de Embedding e Busca ---------------------
+// --------------------- Google Cloud Embeddings ---------------------
+const auth = new GoogleAuth({
+  keyFile: './chatbot-embedding.json', // Coloque seu JSON aqui
+  scopes: 'https://www.googleapis.com/auth/cloud-platform'
+});
+
 async function gerarEmbedding(texto) {
-  const url = "https://openrouter.ai/api/v1/embeddings";
-  const payload = { model: "text-embedding-004", input: texto };
-  const r = await axios.post(url, payload, { headers: { Authorization: `Bearer ${OPENROUTER_KEY}` } });
-  return r.data.data[0].embedding;
+  try {
+    const client = await auth.getClient();
+    const projectId = await auth.getProjectId();
+    const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/textembedding-gecko:predict`;
+    const payload = { instances: [{ content: texto }] };
+    const r = await client.request({ url, method: 'POST', data: payload });
+    return r.data.predictions[0].embedding;
+  } catch (err) {
+    logger.error({ err }, 'Erro ao gerar embedding');
+    throw err;
+  }
 }
 
+// --------------------- Pinecone Functions ---------------------
 async function adicionarProduto(nome, descricao, preco) {
   const emb = await gerarEmbedding(`${nome} - ${descricao}`);
   const produtoId = nome.toLowerCase().replace(/\s+/g, "_");
   await index.upsert({
-    upsertRequest: { vectors: [{ id: produtoId, values: emb, metadata: { nome, descricao, preco } }] }
+    upsertRequest: {
+      vectors: [{ id: produtoId, values: emb, metadata: { nome, descricao, preco } }]
+    }
   });
 }
 
@@ -66,9 +83,12 @@ async function buscarProduto(pergunta) {
 
 // --------------------- Função IA ---------------------
 async function gerarResposta(pergunta, produtoInfo) {
-  const mensagem = produtoInfo
-    ? `Usuário perguntou: ${pergunta}\nProduto encontrado: Nome: ${produtoInfo.nome}, Descrição: ${produtoInfo.descricao}, Preço: ${produtoInfo.preco}. Responda de forma útil e natural.`
-    : `Usuário perguntou: ${pergunta}\nNão encontramos produto relevante. Tente entender a intenção do usuário e responda de forma educada.`;
+  let mensagem;
+  if (produtoInfo) {
+    mensagem = `Usuário perguntou: ${pergunta}\nProduto encontrado: Nome: ${produtoInfo.nome}, Descrição: ${produtoInfo.descricao}, Preço: ${produtoInfo.preco}. Responda de forma útil e natural.`;
+  } else {
+    mensagem = `Usuário perguntou: ${pergunta}\nNão encontramos produto relevante. Tente entender a intenção do usuário e responda de forma educada.`;
+  }
 
   const r = await axios.post("https://openrouter.ai/api/v1/chat/completions", {
     model: "gpt-4o-mini",
@@ -82,18 +102,10 @@ async function gerarResposta(pergunta, produtoInfo) {
 app.get('/', (_, res) => res.send('Bot Online'));
 let latestQr = null;
 app.get('/qr', (_, res) => res.send(latestQr ? `<img src="${latestQr}"/>` : 'Nenhum QR disponível'));
-
-// Rota para desconectar sessão atual do WhatsApp
-app.post('/desconectar', async (_, res) => {
-  try {
-    if (fs.existsSync('./auth_info')) fs.rmSync('./auth_info', { recursive: true, force: true });
-    latestQr = null;
-    await startWA(); // Reinicia a conexão para gerar novo QR
-    res.send('Sessão desconectada. Novo QR será gerado.');
-  } catch (err) {
-    logger.error({ err }, 'Erro ao desconectar sessão');
-    res.status(500).send('Erro ao desconectar sessão');
-  }
+app.get('/desconectar', (_, res) => {
+  if (sockRef?.ws) sockRef.ws.close();
+  latestQr = null;
+  res.send('Desconectado. Atualize /qr para gerar novo QR.');
 });
 
 app.listen(PORT, () => logger.info({ PORT }, 'HTTP server online'));
@@ -101,6 +113,7 @@ app.listen(PORT, () => logger.info({ PORT }, 'HTTP server online'));
 // --------------------- WhatsApp ---------------------
 const sessions = {};
 const now = () => Date.now();
+let sockRef;
 
 function sanitizeText(msg) {
   const m = msg.message;
@@ -118,12 +131,11 @@ function ensureSession(jid) {
   return sessions[jid];
 }
 
-let sock; // Mantém referência global
-
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
   const { version } = await fetchLatestBaileysVersion();
-  sock = makeWASocket({ version, auth: state, printQRInTerminal: false, logger });
+  const sock = makeWASocket({ version, auth: state, printQRInTerminal: false, logger });
+  sockRef = sock;
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -131,9 +143,7 @@ async function startWA() {
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
       if (code !== DisconnectReason.loggedOut) setTimeout(startWA, 2000);
-    } else if (connection === 'open') {
-      latestQr = null;
-    }
+    } else if (connection === 'open') latestQr = null;
   });
 
   sock.ev.on('creds.update', saveCreds);
