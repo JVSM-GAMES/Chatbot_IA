@@ -1,6 +1,5 @@
 import express from 'express';
 import Pino from 'pino';
-import fs from 'fs';
 import qrcode from 'qrcode';
 import axios from 'axios';
 import { Boom } from '@hapi/boom';
@@ -16,8 +15,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 
 // --------------------- Suas Chaves de API ---------------------
-const OPENROUTER_KEY = "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";
-const PINECONE_API_KEY = "pcsk_3xpF3r_KgUPQgiGwpEusPR2iSAU3cERDVMi2LtDNHCHwAGxafTUUDfCTDgnf51aiWzmaTh";
+const OPENROUTER_KEY = process.env.OPENROUTER_KEY;
+const PINECONE_API_KEY = process.env.PINECONE_API_KEY;
 const INDEX_NAME = "produtos-chatbot";
 
 // --------------------- Pinecone ---------------------
@@ -45,7 +44,7 @@ async function initPinecone() {
 
 // --------------------- Google Cloud Embeddings ---------------------
 const auth = new GoogleAuth({
-  keyFile: './chatbot-embedding.json',
+  credentials: JSON.parse(process.env.GCP_CREDENTIALS_JSON),
   scopes: 'https://www.googleapis.com/auth/cloud-platform'
 });
 
