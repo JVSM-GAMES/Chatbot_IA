@@ -83,7 +83,7 @@ async function buscarProduto(pergunta) {
     if (resultado.matches.length) {
       const melhor = resultado.matches.reduce((a, b) => (a.score > b.score ? a : b));
       logger.debug({ melhor }, 'Produto mais relevante encontrado');
-      if (melhor.score >= 0.7) return melhor.metadata;
+      if (melhor.score >= 0.5) return melhor.metadata;
     }
     return null;
   } catch (err) {
