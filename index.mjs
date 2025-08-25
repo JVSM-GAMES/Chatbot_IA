@@ -6,7 +6,6 @@ import { Boom } from '@hapi/boom';
 import { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import PineconePkg from '@pinecone-database/pinecone';
 import { GoogleAuth } from 'google-auth-library';
-import { v1 as uuidv1 } from 'uuid';
 import fs from 'fs';
 
 const logger = Pino({ level: process.env.LOG_LEVEL || 'debug' });
@@ -44,11 +43,9 @@ async function initPinecone() {
 }
 
 // --------------------- Google Cloud Embeddings ---------------------
-// No Render: você cria um Secret File chamado `gcp-key.json`
-// Ele fica disponível no container no caminho `/etc/secrets/gcp-key.json`
-
+// No Render: coloque o Secret File como `gcp-key.json` no container
 const auth = new GoogleAuth({
-  keyFile: '/etc/secrets/ardent-codex-468613-n6-0a10770dbfed.json',
+  keyFile: '/etc/secrets/gcp-key.json',
   scopes: 'https://www.googleapis.com/auth/cloud-platform'
 });
 
@@ -129,17 +126,22 @@ app.get('/qr', async (_, res) => {
   res.send(`<img src="${qrData}"/>`);
 });
 
+// Corrigido: não espera QR, responde imediatamente
 app.get('/desconectar', async (_, res) => {
-  if (sockRef?.ws) sockRef.ws.close();
-  latestQr = null;
-
   try {
-    await startWA();
-    const qrData = await new Promise((resolve) => { qrPendingResolve = resolve; });
-    res.send('Desconectado. Novo QR gerado, acesse /qr.');
+    if (sockRef?.ws) {
+      sockRef.ws.close();
+      latestQr = null;
+      logger.info('Sessão WhatsApp desconectada');
+    }
+
+    // Inicia nova sessão em background
+    startWA().catch(err => logger.error({ err }, 'Erro ao reiniciar sessão WA'));
+
+    res.send('Sessão desconectada. Novo QR será gerado automaticamente. Acesse /qr para visualizar.');
   } catch (err) {
-    logger.error({ err }, 'Erro ao reiniciar sessão WA');
-    res.send('Erro ao reiniciar sessão WA.');
+    logger.error({ err }, 'Erro no /desconectar');
+    res.status(500).send('Erro ao desconectar o WhatsApp.');
   }
 });
 
