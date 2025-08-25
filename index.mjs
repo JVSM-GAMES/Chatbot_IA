@@ -1,78 +1,111 @@
 import express from 'express'
 import Pino from 'pino'
 import fs from 'fs'
-import * as baileys from '@whiskeysockets/baileys'
 import qrcode from 'qrcode'
-import { Boom } from '@hapi/boom'
 import axios from 'axios'
+import { Boom } from '@hapi/boom'
+import { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from '@whiskeysockets/baileys'
+import { PineconeClient } from '@pinecone-database/pinecone'
 
-const { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } = baileys
 const logger = Pino({ level: process.env.LOG_LEVEL || 'info' })
 const app = express()
 app.use(express.json())
+
 const PORT = process.env.PORT || 10000
 
-// Configurações IA
+// --------------------- Suas Chaves de API ---------------------
 const OPENROUTER_KEY = "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"
-const MODEL = "gpt-4o-mini"
-
-// Pinecone + Vertex AI
-import { Pinecone, ServerlessSpec } from 'pinecone'
-import vertexai from '@google-cloud/aiplatform'
-
 const PINECONE_API_KEY = "pcsk_3xpF3r_KgUPQgiGwpEusPR2iSAU3cERDVMi2LtDNHCHwAGxafTUUDfCTDgnf51aiWzmaTh"
 const INDEX_NAME = "produtos-chatbot"
 
-vertexai.init({ project: "ardent-codex-468613-n6", location: "us-central1" })
-const pc = new Pinecone({ apiKey: PINECONE_API_KEY })
-if (!pc.listIndexes().includes(INDEX_NAME)) {
-  pc.createIndex({ name: INDEX_NAME, dimension: 768, metric: 'cosine', spec: new ServerlessSpec({ cloud: 'aws', region: 'us-east-1' }) })
-}
-const index = pc.Index(INDEX_NAME)
+// --------------------- Pinecone ---------------------
+const pc = new PineconeClient()
+await pc.init({
+  apiKey: PINECONE_API_KEY,
+  environment: "us-east1-gcp"
+})
 
-// ---------------- Funções de Embeddings e IA ----------------
+let index
+try {
+  index = pc.Index(INDEX_NAME)
+} catch {
+  await pc.createIndex({ name: INDEX_NAME, dimension: 768, metric: "cosine" })
+  index = pc.Index(INDEX_NAME)
+}
+
+// --------------------- Funções Pinecone ---------------------
 async function gerarEmbedding(texto) {
-  const model = vertexai.TextEmbeddingModel.fromPretrained("text-embedding-004")
-  const resp = await model.getEmbeddings([texto])
-  return resp[0].values
+  const url = "https://openrouter.ai/api/v1/embeddings"
+  const payload = { model: "text-embedding-004", input: texto }
+  const r = await axios.post(url, payload, { headers: { Authorization: `Bearer ${OPENROUTER_KEY}` } })
+  return r.data.data[0].embedding
+}
+
+async function adicionarProduto(nome, descricao, preco) {
+  const emb = await gerarEmbedding(`${nome} - ${descricao}`)
+  const produtoId = nome.toLowerCase().replace(/\s+/g, "_")
+  await index.upsert({
+    upsertRequest: {
+      vectors: [
+        { id: produtoId, values: emb, metadata: { nome, descricao, preco } }
+      ]
+    }
+  })
 }
 
 async function buscarProduto(pergunta) {
   const emb = await gerarEmbedding(pergunta)
-  const resultado = await index.query({ vector: emb, topK: 3, includeMetadata: true })
-  if (resultado.matches.length > 0) {
-    const melhor = resultado.matches[0]
-    if (melhor.score >= 0.55) return melhor.metadata
+  const resultado = await index.query({ queryRequest: { vector: emb, topK: 3, includeMetadata: true } })
+  if (resultado.matches.length) {
+    const melhor = resultado.matches.reduce((a, b) => (a.score > b.score ? a : b))
+    if (melhor.score >= 0.7) return melhor.metadata
   }
   return null
 }
 
-async function gerarResposta(pergunta, produtoInfo = null) {
-  let prompt
+// --------------------- Função IA ---------------------
+async function gerarResposta(pergunta, produtoInfo) {
+  let mensagem
   if (produtoInfo) {
-    prompt = `Um cliente perguntou: '${pergunta}'. Produto encontrado: Nome: ${produtoInfo.nome}, Descrição: ${produtoInfo.descricao}, Preço: ${produtoInfo.preco}. Responda de forma clara, natural, tentando entender a intenção do cliente.`
+    mensagem = `Usuário perguntou: ${pergunta}\nProduto encontrado: Nome: ${produtoInfo.nome}, Descrição: ${produtoInfo.descricao}, Preço: ${produtoInfo.preco}. Responda de forma útil e natural.`
   } else {
-    prompt = `Um cliente perguntou: '${pergunta}'. Não encontramos produto correspondente. Responda de forma amigável, tentando entender a intenção do cliente e sugerindo alternativas.`
+    mensagem = `Usuário perguntou: ${pergunta}\nNão encontramos produto relevante. Tente entender a intenção do usuário e responda de forma educada.`
   }
-  try {
-    const r = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-      model: MODEL,
-      messages: [{ role: 'user', content: prompt }]
-    }, { headers: { Authorization: `Bearer ${OPENROUTER_KEY}` }, timeout: 6000 })
-    return r.data.choices[0].message.content
-  } catch (e) {
-    logger.error({ e }, "Erro OpenRouter")
-    return "Desculpe, não consegui gerar a resposta no momento."
-  }
+
+  const r = await axios.post("https://openrouter.ai/api/v1/chat/completions", {
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: mensagem }]
+  }, { headers: { Authorization: `Bearer ${OPENROUTER_KEY}` } })
+
+  return r.data.choices[0].message.content
 }
 
-// ---------------- WhatsApp ----------------
+// --------------------- Express ---------------------
+app.get('/', (_, res) => res.send('Bot Online'))
+app.get('/qr', (_, res) => res.send(latestQr ? `<img src="${latestQr}"/>` : 'Nenhum QR disponível'))
+
+app.listen(PORT, () => logger.info({ PORT }, 'HTTP server online'))
+
+// --------------------- WhatsApp ---------------------
 let latestQr = null
 const sessions = {}
 
+const now = () => Date.now()
+
 function sanitizeText(msg) {
   const m = msg.message
-  return (m?.conversation || m?.extendedTextMessage?.text || m?.imageMessage?.caption || m?.videoMessage?.caption || '').trim()
+  return (
+    m?.conversation ||
+    m?.extendedTextMessage?.text ||
+    m?.imageMessage?.caption ||
+    m?.videoMessage?.caption ||
+    ''
+  ).trim()
+}
+
+function ensureSession(jid) {
+  if (!sessions[jid]) sessions[jid] = { lastActive: now(), silent: false }
+  return sessions[jid]
 }
 
 async function startWA() {
@@ -85,34 +118,32 @@ async function startWA() {
     if (qr) latestQr = await qrcode.toDataURL(qr)
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode
-      const shouldReconnect = code !== DisconnectReason.loggedOut
-      if (shouldReconnect) setTimeout(startWA, 2000)
-    } else if (connection === 'open') {
-      latestQr = null
-      logger.info('Conectado ao WhatsApp ✅')
-    }
+      if (code !== DisconnectReason.loggedOut) setTimeout(startWA, 2000)
+    } else if (connection === 'open') latestQr = null
   })
 
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue
+      if (!msg.message || msg.key.fromMe) return
       const jid = msg.key.remoteJid
       const text = sanitizeText(msg)
-      if (!text) continue
+      if (!text) return
 
-      // ✅ Busca produto e gera resposta IA
-      const produtoInfo = await buscarProduto(text)
-      const resposta = await gerarResposta(text, produtoInfo)
-      await sock.sendMessage(jid, { text: resposta })
+      const s = ensureSession(jid)
+      s.lastActive = now()
+
+      try {
+        const produtoInfo = await buscarProduto(text)
+        const resposta = await gerarResposta(text, produtoInfo)
+        await sock.sendMessage(jid, { text: resposta })
+      } catch (err) {
+        logger.error({ err }, 'Erro ao processar mensagem')
+        await sock.sendMessage(jid, { text: 'Ops! Ocorreu um erro. Tente novamente mais tarde.' })
+      }
     }
   })
 }
 
 startWA().catch((err) => logger.error({ err }, 'Erro fatal'))
-
-// ---------------- Express ----------------
-app.get('/', (_, res) => res.send('ok'))
-app.get('/qr', (_, res) => latestQr ? res.send(`<img src="${latestQr}" />`) : res.send('Nenhum QR disponível'))
-app.listen(PORT, () => logger.info({ PORT }, 'HTTP server online'))
