@@ -48,7 +48,7 @@ async function initPinecone() {
 // Ele fica disponível no container no caminho `/etc/secrets/gcp-key.json`
 
 const auth = new GoogleAuth({
-  keyFile: '/etc/secrets/gcp-key.json',
+  keyFile: '/etc/secrets/ardent-codex-468613-n6-0a10770dbfed.json',
   scopes: 'https://www.googleapis.com/auth/cloud-platform'
 });
 
