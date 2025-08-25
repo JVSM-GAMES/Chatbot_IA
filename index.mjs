@@ -5,8 +5,9 @@ import qrcode from 'qrcode'
 import axios from 'axios'
 import { Boom } from '@hapi/boom'
 import { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from '@whiskeysockets/baileys'
-import { PineconeClient } from '@pinecone-database/pinecone'
+import PineconePkg from '@pinecone-database/pinecone'
 
+const { PineconeClient } = PineconePkg
 const logger = Pino({ level: process.env.LOG_LEVEL || 'info' })
 const app = express()
 app.use(express.json())
