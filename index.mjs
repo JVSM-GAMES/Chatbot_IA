@@ -5,9 +5,13 @@ import qrcode from 'qrcode'
 import axios from 'axios'
 import { Boom } from '@hapi/boom'
 import { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from '@whiskeysockets/baileys'
-import PineconePkg from '@pinecone-database/pinecone'
+import PineconePkg from '@pinecone-database/pinecone';
 
-const pc = new PineconePkg.PineconeClient()
+const pc = new PineconePkg.PineconeClient();
+await pc.init({
+  apiKey: 'pcsk_3xpF3r_KgUPQgiGwpEusPR2iSAU3cERDVMi2LtDNHCHwAGxafTUUDfCTDgnf51aiWzmaTh',
+  environment: 'us-east1-gcp'
+});
 const logger = Pino({ level: process.env.LOG_LEVEL || 'info' })
 const app = express()
 app.use(express.json())
@@ -18,13 +22,6 @@ const PORT = process.env.PORT || 10000
 const OPENROUTER_KEY = "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"
 const PINECONE_API_KEY = "pcsk_3xpF3r_KgUPQgiGwpEusPR2iSAU3cERDVMi2LtDNHCHwAGxafTUUDfCTDgnf51aiWzmaTh"
 const INDEX_NAME = "produtos-chatbot"
-
-// --------------------- Pinecone ---------------------
-const pc = new PineconeClient()
-await pc.init({
-  apiKey: PINECONE_API_KEY,
-  environment: "us-east1-gcp"
-})
 
 let index
 try {
