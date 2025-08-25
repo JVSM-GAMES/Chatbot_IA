@@ -7,7 +7,7 @@ import { Boom } from '@hapi/boom'
 import { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from '@whiskeysockets/baileys'
 import PineconePkg from '@pinecone-database/pinecone'
 
-const { PineconeClient } = PineconePkg
+const pc = new PineconePkg.PineconeClient()
 const logger = Pino({ level: process.env.LOG_LEVEL || 'info' })
 const app = express()
 app.use(express.json())
