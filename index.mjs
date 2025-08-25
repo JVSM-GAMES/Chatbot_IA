@@ -102,12 +102,18 @@ async function gerarResposta(pergunta, produtoInfo) {
 app.get('/', (_, res) => res.send('Bot Online'));
 let latestQr = null;
 app.get('/qr', (_, res) => res.send(latestQr ? `<img src="${latestQr}"/>` : 'Nenhum QR disponível'));
-app.get('/desconectar', (_, res) => {
+app.get('/desconectar', async (_, res) => {
   if (sockRef?.ws) sockRef.ws.close();
   latestQr = null;
-  res.send('Desconectado. Atualize /qr para gerar novo QR.');
-});
 
+  // Reinicia o WhatsApp para gerar novo QR
+  try {
+    await startWA();
+    res.send('Desconectado. Novo QR gerado, acesse /qr.');
+  } catch (err) {
+    res.send('Erro ao reiniciar sessão WA.');
+  }
+});
 app.listen(PORT, () => logger.info({ PORT }, 'HTTP server online'));
 
 // --------------------- WhatsApp ---------------------
