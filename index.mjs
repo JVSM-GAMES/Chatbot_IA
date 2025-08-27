@@ -1,3 +1,4 @@
+// index.mjs
 import express from "express"
 import fs from "fs"
 import path from "path"
@@ -6,6 +7,7 @@ import qrcode from "qrcode"
 import * as baileys from "@whiskeysockets/baileys"
 import { Pinecone } from "@pinecone-database/pinecone"
 import { GoogleAuth } from "google-auth-library"
+import Pino from "pino"
 
 const { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } = baileys
 const app = express()
@@ -34,15 +36,13 @@ const pinecone = new Pinecone({ apiKey: PINECONE_API_KEY })
 let index = pinecone.index(INDEX_NAME)
 
 // ---------------- EMBEDDING MOCK ----------------
-// ⚠️ aqui você deve trocar para a chamada real do Vertex AI embeddings
+// ⚠️ Trocar para chamada real do Vertex AI embeddings
 async function gerarEmbedding(texto) {
   try {
     const client = await auth.getClient()
     const projectId = await auth.getProjectId()
     console.log("Gerando embedding para:", texto, "no projeto:", projectId)
-
-    // Simulação: vetor de 3 números
-    return Array(768).fill(Math.random())
+    return Array(768).fill(Math.random()) // Mock
   } catch (err) {
     console.error("Erro ao gerar embedding:", err)
     throw err
@@ -110,7 +110,14 @@ let qrCodeData = null
 async function startSock() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
   const { version } = await fetchLatestBaileysVersion()
-  sock = makeWASocket({ version, logger: undefined, auth: state })
+
+  // usa Pino aqui ✅
+  sock = makeWASocket({
+    version,
+    logger: Pino({ level: "info" }),
+    auth: state,
+    browser: ["RenderBot", "Chrome", "1.0.0"]
+  })
 
   sock.ev.on("creds.update", saveCreds)
 
