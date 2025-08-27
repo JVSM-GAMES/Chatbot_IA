@@ -1,15 +1,13 @@
-// index.mjs
 import express from "express"
 import fs from "fs"
-import path from "path"
-import axios from "axios"
 import qrcode from "qrcode"
+import axios from "axios"
+import Pino from "pino"
 import * as baileys from "@whiskeysockets/baileys"
 import { Pinecone } from "@pinecone-database/pinecone"
 import { GoogleAuth } from "google-auth-library"
-import Pino from "pino"
 
-const { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } = baileys
+const logger = Pino({ level: process.env.LOG_LEVEL || "info" })
 const app = express()
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
@@ -20,15 +18,16 @@ const MODEL = "gpt-4o-mini"
 const PINECONE_API_KEY = process.env.PINECONE_API_KEY
 const INDEX_NAME = "produtos-chatbot"
 const CREDENTIALS_PATH = "/etc/secrets/ardent-codex-468613-n6-0a10770dbfed.json"
+const SESSION_DIR = "./auth_info_baileys"
 
 // ---------------- GOOGLE VERTEX AUTH ----------------
 if (!fs.existsSync(CREDENTIALS_PATH)) {
-  console.error("Arquivo de credenciais não encontrado:", CREDENTIALS_PATH)
+  logger.error("Arquivo de credenciais não encontrado:", CREDENTIALS_PATH)
   process.exit(1)
 }
 const auth = new GoogleAuth({
   keyFile: CREDENTIALS_PATH,
-  scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+  scopes: ["https://www.googleapis.com/auth/cloud-platform"],
 })
 
 // ---------------- PINECONE ----------------
@@ -36,35 +35,30 @@ const pinecone = new Pinecone({ apiKey: PINECONE_API_KEY })
 let index = pinecone.index(INDEX_NAME)
 
 // ---------------- EMBEDDING MOCK ----------------
-// ⚠️ Trocar para chamada real do Vertex AI embeddings
 async function gerarEmbedding(texto) {
+  if (!texto) texto = ""
   try {
     const client = await auth.getClient()
     const projectId = await auth.getProjectId()
-    console.log("Gerando embedding para:", texto, "no projeto:", projectId)
-    return Array(768).fill(Math.random()) // Mock
+    logger.info({ texto }, `Gerando embedding no projeto ${projectId}`)
+    // Mock: substitua por chamada real ao Vertex AI
+    return Array(768).fill(Math.random())
   } catch (err) {
-    console.error("Erro ao gerar embedding:", err)
+    logger.error({ err }, "Erro ao gerar embedding")
     throw err
   }
 }
 
 // ---------------- FUNÇÕES DE PRODUTOS ----------------
 async function adicionarProduto(nome, descricao, preco) {
-  const emb = await gerarEmbedding(nome + " - " + descricao)
+  const emb = await gerarEmbedding(`${nome} - ${descricao}`)
   const produtoId = nome.toLowerCase().replace(/ /g, "_")
-  await index.upsert([
-    { id: produtoId, values: emb, metadata: { nome, descricao, preco } }
-  ])
+  await index.upsert([{ id: produtoId, values: emb, metadata: { nome, descricao, preco } }])
 }
 
 async function buscarProduto(pergunta) {
   const emb = await gerarEmbedding(pergunta)
-  const resultado = await index.query({
-    vector: emb,
-    topK: 3,
-    includeMetadata: true
-  })
+  const resultado = await index.query({ vector: emb, topK: 3, includeMetadata: true })
   if (resultado.matches.length > 0 && resultado.matches[0].score >= 0.5) {
     return resultado.matches[0].metadata
   }
@@ -83,76 +77,70 @@ async function gerarResposta(pergunta, produtoInfo) {
   try {
     const r = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
-      {
-        model: MODEL,
-        messages: [{ role: "user", content: prompt }]
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${OPENROUTER_KEY}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 10000
-      }
+      { model: MODEL, messages: [{ role: "user", content: prompt }] },
+      { headers: { Authorization: `Bearer ${OPENROUTER_KEY}`, "Content-Type": "application/json" }, timeout: 10000 }
     )
     return r.data.choices[0].message.content
   } catch (e) {
-    console.error("Erro OpenRouter:", e.message)
+    logger.error({ err: e }, "Erro OpenRouter")
     return "Erro ao gerar resposta no momento. Tente mais tarde."
   }
 }
 
 // ---------------- WHATSAPP ----------------
-const SESSION_DIR = "./auth_info_baileys"
-let sock
+let sock = null
 let qrCodeData = null
+const { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } = baileys
 
 async function startSock() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
   const { version } = await fetchLatestBaileysVersion()
-
-  // usa Pino aqui ✅
-  sock = makeWASocket({
-    version,
-    logger: Pino({ level: "info" }),
-    auth: state,
-    browser: ["RenderBot", "Chrome", "1.0.0"]
-  })
+  sock = makeWASocket({ version, auth: state, logger })
 
   sock.ev.on("creds.update", saveCreds)
 
-  sock.ev.on("connection.update", (update) => {
+  sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update
-    if (qr) qrCodeData = qr
-    if (connection === "open") {
-      console.log("✅ Conectado ao WhatsApp!")
+
+    if (qr) {
+      qrCodeData = qr
+      logger.info("Novo QR gerado, use /qr para visualizar")
+    }
+
+    if (connection === "close") {
+      const reason = new baileys.Boom(lastDisconnect?.error)?.output?.statusCode
+      logger.warn({ reason }, "Conexão fechada, reconectando...")
+      setTimeout(startSock, 2000)
+    } else if (connection === "open") {
+      logger.info("✅ Conectado ao WhatsApp!")
       qrCodeData = null
     }
   })
 
-  // Ouvir mensagens recebidas
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return
     const msg = messages[0]
     if (!msg.message || msg.key.fromMe) return
 
     const from = msg.key.remoteJid
-    const text =
-      msg.message.conversation || msg.message.extendedTextMessage?.text
-    console.log("📩 Mensagem recebida:", text)
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text
+    if (!text) return
 
-    if (text) {
+    logger.info({ from, text }, "Mensagem recebida")
+    try {
       const produto = await buscarProduto(text)
       const resposta = await gerarResposta(text, produto)
       await sock.sendMessage(from, { text: resposta })
+      logger.info({ from, resposta }, "Resposta enviada")
+    } catch (err) {
+      logger.error({ err }, "Erro ao processar mensagem")
+      await sock.sendMessage(from, { text: "Ops! Ocorreu um erro. Tente novamente mais tarde." })
     }
   })
 }
 
 // ---------------- ROTAS WEB ----------------
-app.get("/", (req, res) => {
-  res.send("✅ Bot está rodando!")
-})
+app.get("/", (req, res) => res.send("✅ Bot está rodando!"))
 
 app.get("/qr", async (req, res) => {
   if (qrCodeData) {
@@ -163,13 +151,17 @@ app.get("/qr", async (req, res) => {
   }
 })
 
-app.post("/desconectar", (req, res) => {
-  if (fs.existsSync(SESSION_DIR)) {
-    fs.rmSync(SESSION_DIR, { recursive: true, force: true })
-  }
+app.post("/desconectar", async (req, res) => {
+  if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true })
   qrCodeData = null
   sock = null
-  res.send("Sessão apagada. Reinicie para gerar novo QR.")
+  try {
+    await startSock()
+    res.send("Sessão apagada. Novo QR gerado em /qr.")
+  } catch (err) {
+    logger.error({ err }, "Erro ao reiniciar WhatsApp")
+    res.status(500).send("Erro ao reiniciar sessão WA")
+  }
 })
 
 app.post("/produto", async (req, res) => {
@@ -179,15 +171,21 @@ app.post("/produto", async (req, res) => {
 })
 
 app.post("/chat", async (req, res) => {
-  const { pergunta } = req.body
-  const produto = await buscarProduto(pergunta)
-  const resposta = await gerarResposta(pergunta, produto)
-  res.json({ resposta, produto })
+  const { message } = req.body
+  if (!message) return res.status(400).json({ error: "Mensagem obrigatória" })
+  try {
+    const produto = await buscarProduto(message)
+    const resposta = await gerarResposta(message, produto)
+    res.json({ resposta, produto })
+  } catch (err) {
+    logger.error({ err }, "Erro /chat")
+    res.status(500).json({ error: "Erro interno" })
+  }
 })
 
 // ---------------- START ----------------
 const PORT = process.env.PORT || 3000
 app.listen(PORT, async () => {
-  console.log("Servidor rodando na porta", PORT)
+  logger.info({ PORT }, "Servidor rodando")
   await startSock()
 })
