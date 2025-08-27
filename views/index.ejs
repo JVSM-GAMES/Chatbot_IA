@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <title>Chatbot IA - Produtos</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    h1 { color: #333; }
+    form { margin-bottom: 20px; }
+    input, textarea { display: block; margin: 5px 0; width: 300px; padding: 5px; }
+    button { padding: 8px 15px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+    button:hover { background: #45a049; }
+    .produto { border: 1px solid #ccc; padding: 10px; margin: 5px 0; }
+  </style>
+</head>
+<body>
+  <h1>Cadastrar Produto</h1>
+  <form method="POST" action="/">
+    <input type="text" name="nome" placeholder="Nome do Produto" required />
+    <textarea name="descricao" placeholder="Descrição" required></textarea>
+    <input type="number" name="preco" placeholder="Preço" step="0.01" required />
+    <button type="submit">Adicionar Produto</button>
+  </form>
+
+  <h2>Produtos Cadastrados</h2>
+  <% if (produtos && produtos.length > 0) { %>
+    <% produtos.forEach(produto => { %>
+      <div class="produto">
+        <strong><%= produto.nome %></strong><br />
+        <em><%= produto.descricao %></em><br />
+        Preço: R$ <%= produto.preco %>
+      </div>
+    <% }) %>
+  <% } else { %>
+    <p>Nenhum produto cadastrado.</p>
+  <% } %>
+
+  <h2>Chat com IA</h2>
+  <input type="text" id="pergunta" placeholder="Digite sua pergunta" />
+  <button onclick="enviarPergunta()">Enviar</button>
+  <div id="resposta" style="margin-top: 15px; border: 1px solid #ccc; padding: 10px;"></div>
+
+  <script>
+    async function enviarPergunta() {
+      const pergunta = document.getElementById('pergunta').value;
+      if (!pergunta) return;
+
+      const respostaDiv = document.getElementById('resposta');
+      respostaDiv.innerHTML = "Carregando...";
+
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pergunta })
+      });
+      const data = await res.json();
+      respostaDiv.innerHTML = `<strong>Resposta:</strong> ${data.resposta}`;
+    }
+  </script>
+</body>
+</html>
