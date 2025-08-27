@@ -1,132 +1,101 @@
-import express from 'express'
-import Pino from 'pino'
-import fs from 'fs'
-import * as baileys from '@whiskeysockets/baileys'
-import qrcode from 'qrcode'
-import { Boom } from '@hapi/boom'
-import { GoogleAuth } from 'google-auth-library'
-import { Pinecone } from '@pinecone-database/pinecone'
+import express from "express"
+import Pino from "pino"
+import fs from "fs"
+import * as baileys from "@whiskeysockets/baileys"
+import qrcode from "qrcode"
+import path from "path"
 
 const { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } = baileys
-const logger = Pino({ level: 'info' })
+
 const app = express()
+app.use(express.json())
 
-// ================== GOOGLE AUTH COM SECRET FILE ==================
-const CREDENTIALS_PATH = '/etc/secrets/ardent-codex-468613-n6-0a10770dbfed.json'
-if (!fs.existsSync(CREDENTIALS_PATH)) {
-  logger.error(`Arquivo de credenciais não encontrado em: ${CREDENTIALS_PATH}`)
-  process.exit(1)
-}
+const logger = Pino({ level: "silent" })
+const SESSION_DIR = "./auth_info_baileys"
 
-const auth = new GoogleAuth({
-  keyFile: CREDENTIALS_PATH,
-  scopes: ['https://www.googleapis.com/auth/cloud-platform']
-})
+let sock
+let qrCodeData = null
 
-// ================== PINECONE ==================
-const pinecone = new Pinecone({
-  apiKey: process.env.PINECONE_API_KEY
-})
-
-// ================== VARIÁVEIS GLOBAIS ==================
-let sockRef = null
-let latestQr = null
-
-// ================== EMBEDDINGS & BUSCA ==================
-async function gerarEmbedding(texto) {
-  try {
-    const client = await auth.getClient()
-    const projectId = await auth.getProjectId()
-
-    logger.info(`Gerando embedding no projeto: ${projectId}`)
-    return { vector: [0.1, 0.2, 0.3] } // mock
-  } catch (err) {
-    logger.error({ err }, "Erro ao gerar embedding")
-    throw err
-  }
-}
-
-async function buscarProduto(consulta) {
-  try {
-    const embedding = await gerarEmbedding(consulta)
-    const index = pinecone.index("produtos")
-    const resultado = await index.query({
-      vector: embedding.vector,
-      topK: 3,
-      includeMetadata: true
-    })
-    return resultado.matches
-  } catch (err) {
-    logger.error({ err }, "Erro ao buscar produto no Pinecone")
-    throw err
-  }
-}
-
-// ================== WHATSAPP ==================
+// Função para iniciar conexão
 async function startSock() {
-  const { state, saveCreds } = await useMultiFileAuthState('auth')
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
   const { version } = await fetchLatestBaileysVersion()
-  const sock = makeWASocket({ version, auth: state, logger })
 
-  sockRef = sock // guarda referência global
+  sock = makeWASocket({
+    version,
+    logger,
+    printQRInTerminal: false,
+    auth: state
+  })
 
-  sock.ev.on('creds.update', saveCreds)
-
-  sock.ev.on('connection.update', (update) => {
+  // Evento para QR
+  sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update
+
     if (qr) {
-      latestQr = qr
-      logger.info("Novo QR Code gerado, acesse /qr para visualizar")
+      qrCodeData = qr
+      console.log("Novo QR gerado, use /qr para visualizar.")
     }
 
-    if (connection === 'close') {
-      const reason = new Boom(lastDisconnect?.error).output.statusCode
-      logger.error(`Conexão fechada: ${reason}`)
-    } else if (connection === 'open') {
-      logger.info("✅ Conectado ao WhatsApp!")
-      latestQr = null // QR não é mais necessário
+    if (connection === "close") {
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
+      console.log("Conexão fechada. Reconectar:", shouldReconnect)
+      if (shouldReconnect) {
+        startSock()
+      }
+    } else if (connection === "open") {
+      console.log("✅ Conectado ao WhatsApp!")
+      qrCodeData = null
     }
   })
+
+  sock.ev.on("creds.update", saveCreds)
 }
 
-// ================== ROTAS EXPRESS ==================
-
-// Página com QR
-app.get('/qr', async (req, res) => {
-  if (!latestQr) {
-    return res.send("Nenhum QR disponível. Se já está conectado, não precisa escanear.")
+// Função para resetar sessão
+function resetSession() {
+  if (fs.existsSync(SESSION_DIR)) {
+    fs.rmSync(SESSION_DIR, { recursive: true, force: true })
+    console.log("🗑️ Sessão apagada.")
   }
-  try {
-    const qrImage = await qrcode.toDataURL(latestQr)
-    res.send(`
-      <html>
-        <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;">
-          <h2>Escaneie o QR Code no WhatsApp</h2>
-          <img src="${qrImage}" />
-        </body>
-      </html>
-    `)
-  } catch (err) {
-    res.status(500).send("Erro ao gerar QR")
+  qrCodeData = null
+  sock = null
+}
+
+// Rota para pegar QR
+app.get("/qr", async (req, res) => {
+  if (qrCodeData) {
+    const qrImage = await qrcode.toDataURL(qrCodeData)
+    res.send(`<img src="${qrImage}" />`)
+  } else {
+    res.send("Nenhum QR disponível. Se já está conectado, não precisa escanear.")
   }
 })
 
-// Desconectar e gerar novo QR
-app.get('/desconectar', async (req, res) => {
+// Rota para desconectar
+app.post("/desconectar", (req, res) => {
+  resetSession()
+  res.send("Sessão desconectada e apagada. Reinicie /qr para novo login.")
+})
+
+// Rota para enviar mensagem
+app.post("/enviar", async (req, res) => {
+  const { numero, mensagem } = req.body
+  if (!sock) return res.status(400).send("❌ Não conectado ao WhatsApp.")
+
   try {
-    if (sockRef?.ws) {
-      sockRef.ws.close()
-      latestQr = null
-      logger.info("Sessão WhatsApp desconectada")
-    }
-    startSock().catch(err => logger.error({ err }, "Erro ao reiniciar sessão WA"))
-    res.send("Sessão desconectada. Novo QR será gerado. Acesse /qr para escanear.")
+    const jid = numero + "@s.whatsapp.net"
+    await sock.sendMessage(jid, { text: mensagem })
+    res.send("Mensagem enviada com sucesso!")
   } catch (err) {
-    logger.error({ err }, "Erro no /desconectar")
-    res.status(500).send("Erro ao desconectar")
+    console.error("Erro ao enviar mensagem:", err)
+    res.status(500).send("Erro ao enviar mensagem.")
   }
 })
 
-// ================== START ==================
-startSock()
-app.listen(3000, () => logger.info("Servidor rodando na porta 3000"))
+// Inicia servidor
+app.listen(3000, async () => {
+  console.log("Servidor rodando na porta 3000")
+  await startSock()
+})
