@@ -12,7 +12,7 @@ const logger = Pino({ level: 'info' })
 const app = express()
 
 // ✅ Carrega credenciais do Secret File montado pelo Cloud Run
-const CREDENTIALS_PATH = '/etc/secrets/gcp-key.json'
+const CREDENTIALS_PATH = '/etc/secrets/ardent-codex-468613-n6-0a10770dbfed.json'
 if (!fs.existsSync(CREDENTIALS_PATH)) {
   logger.error(`Arquivo de credenciais não encontrado em: ${CREDENTIALS_PATH}`)
   process.exit(1)
